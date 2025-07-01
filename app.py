@@ -5,24 +5,21 @@ import io
 st.set_page_config(layout="wide")
 st.title("🚛 Konteyner Yükleme Planlama Aracı")
 
-uploaded_file = st.file_uploader("📎 Dosya yükle (Excel formatında)", type=["xlsx"])
+uploaded_file = st.file_uploader("📌 Dosya yükle (Excel formatında)", type=["xlsx"])
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
 
-    # Uzunluğu Product Code’dan çek
     df["Uzunluk (cm)"] = df["Product Code"].apply(lambda x: int(str(x).split("/")[2]))
     df["Bobin Ağırlığı (kg)"] = df["Uzunluk (cm)"] * 1.15
-    df["Bobin Adedi"] = (df["Order"] / df["Bobin Ağırlığı (kg)"]).round().astype(int)
+    df["Bobin Adedi"] = (df["Order"] / df["Bobin Ağırlığı (kg)"].astype(float)).round().astype(int)
     df["Üst Tabana Uygun"] = df["Uzunluk (cm)"] <= 1250
 
     st.dataframe(df)
 
-    # Planlamaya başlamadan önce tonaj sorulsun
-    ton_basina_yuk = st.number_input("🧮 Her bir konteyner planı için maksimum tonaj girin (kg)", min_value=1000, max_value=30000, value=25000, step=500)
+    ton_basina_yuk = st.number_input("🧽 Her bir konteyner planı için maksimum tonaj girin (kg)", min_value=1000, max_value=30000, value=25000, step=500)
     st.markdown(f"💡 Her konteyner için maksimum yükleme sınırı: **{ton_basina_yuk:,} kg**")
 
-    # Bobinleri satır satır çoğaltalım
     rows = []
     for _, row in df.iterrows():
         for _ in range(row["Bobin Adedi"]):
@@ -34,7 +31,7 @@ if uploaded_file:
             })
 
     bobinler = pd.DataFrame(rows)
-    bobinler = bobinler.sort_values(by="Ağırlık", ascending=False).reset_index(drop=True)
+    bobinler = bobinler.reset_index(drop=True)
 
     planlar = []
     kalan_bobinler = bobinler.copy()
@@ -42,60 +39,103 @@ if uploaded_file:
     while not kalan_bobinler.empty:
         konteyner = []
         toplam_agirlik = 0
-        alt_sayac = 0
-        ust_sayac = 0
+        alt_bobinler = []
+        ust_bobinler = []
 
+        # Alt tabana 11 adede kadar büyük (1250 üstü) bobin yerleştir
         for idx in list(kalan_bobinler.index):
             bobin = kalan_bobinler.loc[idx]
             if toplam_agirlik + bobin["Ağırlık"] > ton_basina_yuk:
                 continue
-
-            if not bobin["Üst Tabana Uygun"] and alt_sayac < 11:
-                konteyner.append({**bobin, "Taban": "Alt"})
-                alt_sayac += 1
+            if not bobin["Üst Tabana Uygun"] and len(alt_bobinler) < 11:
+                alt_bobinler.append({**bobin, "Taban": "Alt"})
                 toplam_agirlik += bobin["Ağırlık"]
                 kalan_bobinler = kalan_bobinler.drop(idx)
-            elif bobin["Üst Tabana Uygun"]:
-                if alt_sayac < 11:
-                    konteyner.append({**bobin, "Taban": "Alt"})
-                    alt_sayac += 1
-                    toplam_agirlik += bobin["Ağırlık"]
-                    kalan_bobinler = kalan_bobinler.drop(idx)
-                elif ust_sayac < 11:
-                    konteyner.append({**bobin, "Taban": "Üst"})
-                    ust_sayac += 1
+
+        # Üst tabana 11 adede kadar kısa (1250 ve altı) bobin yerleştir
+        for idx in list(kalan_bobinler.index):
+            bobin = kalan_bobinler.loc[idx]
+            if not bobin["Üst Tabana Uygun"]:
+                continue
+            if toplam_agirlik + bobin["Ağırlık"] > ton_basina_yuk:
+                continue
+            if len(ust_bobinler) >= 11:
+                break
+
+            i = len(ust_bobinler)
+            if i < len(alt_bobinler):
+                alt_uzunluk = sorted([b["Uzunluk (cm)"] for b in alt_bobinler])[i]
+            else:
+                alt_uzunluk = 0
+
+            # Yükseklik toplamı 2650'yi geçmesin
+            if bobin["Uzunluk (cm)"] + alt_uzunluk <= 2650:
+                ust_bobinler.append({**bobin, "Taban": "Üst"})
+                toplam_agirlik += bobin["Ağırlık"]
+                kalan_bobinler = kalan_bobinler.drop(idx)
+
+        # Eğer elimizde sadece kısa bobinler kaldıysa (1250 ve altı), hem alta hem üste yerleştirebiliriz
+        if len(alt_bobinler) == 0 and len(ust_bobinler) == 0 and kalan_bobinler["Üst Tabana Uygun"].all():
+            for idx in list(kalan_bobinler.index):
+                bobin = kalan_bobinler.loc[idx]
+                if toplam_agirlik + bobin["Ağırlık"] > ton_basina_yuk:
+                    continue
+                if len(alt_bobinler) < 11:
+                    alt_bobinler.append({**bobin, "Taban": "Alt"})
+                elif len(ust_bobinler) < 11:
+                    if bobin["Uzunluk (cm)"] + 0 <= 2650:
+                        ust_bobinler.append({**bobin, "Taban": "Üst"})
+                toplam_agirlik += bobin["Ağırlık"]
+                kalan_bobinler = kalan_bobinler.drop(idx)
+
+        # Tonaj eksikse aynı ürünlerden ekle (uzunluk sınırı + konteyner yüksekliği aşımı olmadan)
+        for idx in list(kalan_bobinler.index):
+            if toplam_agirlik >= ton_basina_yuk:
+                break
+            bobin = kalan_bobinler.loc[idx]
+            if toplam_agirlik + bobin["Ağırlık"] > ton_basina_yuk:
+                continue
+            if len(alt_bobinler) < 11:
+                alt_bobinler.append({**bobin, "Taban": "Alt"})
+                toplam_agirlik += bobin["Ağırlık"]
+                kalan_bobinler = kalan_bobinler.drop(idx)
+            elif len(ust_bobinler) < 11:
+                i = len(ust_bobinler)
+                if i < len(alt_bobinler):
+                    alt_uzunluk = sorted([b["Uzunluk (cm)"] for b in alt_bobinler])[i]
+                else:
+                    alt_uzunluk = 0
+                if bobin["Uzunluk (cm)"] + alt_uzunluk <= 2650:
+                    ust_bobinler.append({**bobin, "Taban": "Üst"})
                     toplam_agirlik += bobin["Ağırlık"]
                     kalan_bobinler = kalan_bobinler.drop(idx)
 
+        konteyner = alt_bobinler + ust_bobinler
         planlar.append((f"Konteyner {len(planlar) + 1} - Toplam Ağırlık: {round(toplam_agirlik)} kg", pd.DataFrame(konteyner)))
 
     st.subheader("📦 Konteyner Planları")
-    for plan_adi, tablo in planlar:
+    excel_output = pd.ExcelWriter("planlar.xlsx", engine="xlsxwriter")
+    for i, (plan_adi, tablo) in enumerate(planlar):
         st.markdown(f"### {plan_adi}")
         st.dataframe(tablo.reset_index(drop=True))
+        tablo.to_excel(excel_output, sheet_name=f"Plan {i+1}", index=False)
 
-    # Özet oluştur
-    st.subheader("📊 Planlama Özeti")
-    toplam_df = pd.concat([plan for _, plan in planlar])
-    toplam_df = toplam_df.merge(df[["Product Code", "Order"]], left_on="Ürün Adı", right_on="Product Code", how="left")
+    st.subheader("📊 Özet Rapor")
+    toplam_konteyner = len(planlar)
+    st.write(f"Toplam konteyner sayısı: **{toplam_konteyner}**")
 
-    summary = toplam_df.groupby("Ürün Adı").agg({
-        "Ağırlık": "sum",
-        "Order": "first"
-    }).reset_index()
-    summary.rename(columns={"Ağırlık": "Planlanan Yük (kg)", "Order": "Toplam Sipariş (kg)"}, inplace=True)
-    summary["Kalan Sipariş (kg)"] = summary["Toplam Sipariş (kg)"] - summary["Planlanan Yük (kg)"]
+    ozet = bobinler.copy()
+    ozet["Plana Alındı"] = True
+    original_orders = df.set_index("Product Code")["Order"].to_dict()
+    ozet_grouped = ozet.groupby("Ürün Adı").agg({
+        "Ağırlık": "sum"
+    }).rename(columns={"Ağırlık": "Plana Alınan Toplam Order"})
+    ozet_grouped["Toplam Order"] = ozet_grouped.index.map(original_orders)
+    ozet_grouped["Kalan Order"] = ozet_grouped["Toplam Order"] - ozet_grouped["Plana Alınan Toplam Order"]
 
-    st.dataframe(summary)
+    st.dataframe(ozet_grouped.reset_index())
+    ozet_grouped.to_excel(excel_output, sheet_name="Özet", index=True)
+    excel_output.close()
 
-    # Excel çıktısı indir
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        summary.to_excel(writer, index=False, sheet_name="Özet")
-
-    st.download_button(
-        label="📥 Özeti Excel olarak indir",
-        data=output.getvalue(),
-        file_name="konteyner_ozet.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    with open("planlar.xlsx", "rb") as f:
+        st.download_button("📅 Excel olarak indir (Plan + Özet)", data=f, file_name="planlar.xlsx")

@@ -11,19 +11,20 @@ uploaded_file = st.file_uploader("📌 Dosya yükle (Excel formatında)", type=[
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
 
+    # Hesaplamalar
     df["Uzunluk (cm)"] = df["Product Code"].apply(lambda x: int(str(x).split("/")[2]))
     df["Bobin Ağırlığı (kg)"] = df["Uzunluk (cm)"] * 1.15
     df["Bobin Adedi"] = (df["Order"] / df["Bobin Ağırlığı (kg)"].astype(float)).round().astype(int)
     df["Üst Tabana Uygun"] = df["Uzunluk (cm)"] <= 1250
-
     st.dataframe(df)
 
-    ton_basina_yuk = st.number_input("🧽 Her bir konteyner planı için maksimum tonaj girin (kg)", min_value=1000, max_value=30000, value=25000, step=500)
-    min_konteyner_tonaj = st.number_input("🔻 Minimum kabul edilebilir konteyner tonajı (kg)", min_value=1000, max_value=ton_basina_yuk, value=20000, step=500)
-    hedef_konteyner_sayisi = st.number_input("🎯 Hedef konteyner sayısı (isteğe bağlı)", min_value=0, value=0, step=1)
+    # Parametreler
+    ton_basina_yuk = st.number_input("🧽 Maks konteyner tonajı (kg)", min_value=1000, max_value=30000, value=25000, step=500)
+    min_konteyner_tonaj = st.number_input("🔻 Min konteyner tonajı (kg)", min_value=1000, max_value=ton_basina_yuk, value=20000, step=500)
+    hedef_konteyner_sayisi = st.number_input("🎯 Hedef konteyner sayısı (0=tanımsız)", min_value=0, value=0, step=1)
+    st.markdown(f"💡 Tonaj aralığı: **{min_konteyner_tonaj:,} - {ton_basina_yuk:,}** kg")
 
-    st.markdown(f"💡 Her konteyner için yükleme sınırı: **{ton_basina_yuk:,} kg**, minimum: **{min_konteyner_tonaj:,} kg**")
-
+    # Bobin listesi
     rows = []
     for _, row in df.iterrows():
         for _ in range(row["Bobin Adedi"]):
@@ -33,76 +34,93 @@ if uploaded_file:
                 "Ağırlık": row["Bobin Ağırlığı (kg)"],
                 "Üst Tabana Uygun": row["Üst Tabana Uygun"]
             })
+    bobinler = pd.DataFrame(rows)
+    bobinler = bobinler.reset_index(drop=True)
 
-    bobinler = pd.DataFrame(rows).reset_index(drop=True)
+    # Sabitler
+    MAX_ALT = 11
+    MAX_UST = 11
+    MAX_HIGH = 2650
+
+    # Konteyner planlama fonksiyonu
+    def konteyner_skora_gore_planla(bobin_df):
+        altlar = bobin_df[~bobin_df["Üst Tabana Uygun"]].to_dict("records")
+        ustler = bobin_df[bobin_df["Üst Tabana Uygun"]].to_dict("records")
+        best_score = -1
+        best_plan = []
+        best_weight = 0
+        # Tüm kombinasyon boyutları
+        for alt_len in range(1, min(MAX_ALT, len(altlar)) + 1):
+            for alt_combo in combinations(altlar, alt_len):
+                alt_list = list(alt_combo)
+                alt_weight = sum(b["Ağırlık"] for b in alt_list)
+                # Üst bobin sayısı
+                for ust_len in range(1, min(MAX_UST, len(ustler)) + 1):
+                    for ust_combo in combinations(ustler, ust_len):
+                        ust_list = list(ust_combo)
+                        total_weight = alt_weight + sum(b["Ağırlık"] for b in ust_list)
+                        # Tonaj sınırı
+                        if total_weight > ton_basina_yuk or total_weight < min_konteyner_tonaj:
+                            continue
+                        # Yükseklik kontrolü
+                        ok = True
+                        for i in range(min(len(alt_list), len(ust_list))):
+                            if alt_list[i]["Uzunluk (cm)"] + ust_list[i]["Uzunluk (cm)"] > MAX_HIGH:
+                                ok = False
+                                break
+                        if not ok:
+                            continue
+                        # Skor: yükseklik uyum + tonaj yakınlık
+                        height_score = sum(1 for i in range(min(len(alt_list), len(ust_list)))
+                                           if alt_list[i]["Uzunluk (cm)"] + ust_list[i]["Uzunluk (cm)"] <= MAX_HIGH)
+                        tonaj_score = 1 - abs(total_weight - ton_basina_yuk) / ton_basina_yuk
+                        score = height_score + tonaj_score
+                        if score > best_score:
+                            best_score = score
+                            best_plan = (alt_list, ust_list)
+                            best_weight = total_weight
+        # Etiketleme
+        if best_plan:
+            alt_list, ust_list = best_plan
+            for b in alt_list: b["Taban"] = "Alt"
+            for b in ust_list: b["Taban"] = "Üst"
+            return alt_list + ust_list, best_weight
+        return [], 0
+
+    # Ana döngü
     planlar = []
-    kalan_bobinler = bobinler.copy()
-
-    def hesapla_skor(alt, ust, max_uzunluk=2650, hedef_tonaj=25000):
-        toplam_agirlik = sum(b["Ağırlık"] for b in alt + ust)
-        yukseklik_uyum_skoru = sum(
-            1 for i in range(min(len(alt), len(ust)))
-            if alt[i]["Uzunluk (cm)"] + ust[i]["Uzunluk (cm)"] <= max_uzunluk
-        )
-        tonaj_yakinlik_skoru = max(0, 1 - abs(toplam_agirlik - hedef_tonaj) / hedef_tonaj)
-        return yukseklik_uyum_skoru + tonaj_yakinlik_skoru, toplam_agirlik
-
-    while not kalan_bobinler.empty:
+    kalan = bobinler.copy()
+    while not kalan.empty:
         if hedef_konteyner_sayisi and len(planlar) >= hedef_konteyner_sayisi:
             break
-
-        alt_bobinler_all = kalan_bobinler[kalan_bobinler["Üst Tabana Uygun"] == False].to_dict("records")
-        ust_bobinler_all = kalan_bobinler[kalan_bobinler["Üst Tabana Uygun"] == True].to_dict("records")
-
-        en_iyi_skor = -1
-        en_iyi_alt = []
-        en_iyi_ust = []
-
-        for alt_combo in combinations(alt_bobinler_all, min(11, len(alt_bobinler_all))):
-            for ust_combo in combinations(ust_bobinler_all, min(11, len(ust_bobinler_all))):
-                skor, agirlik = hesapla_skor(list(alt_combo), list(ust_combo), 2650, ton_basina_yuk)
-                if agirlik <= ton_basina_yuk and agirlik >= min_konteyner_tonaj and skor > en_iyi_skor:
-                    en_iyi_skor = skor
-                    en_iyi_alt = list(alt_combo)
-                    en_iyi_ust = list(ust_combo)
-
-        if not en_iyi_alt and not en_iyi_ust:
+        plan, weight = konteyner_skora_gore_planla(kalan)
+        if not plan:
             break
+        # Kullanılan bobinleri kaldır
+        used_idx = []
+        for b in plan:
+            idx = kalan[(kalan["Ürün Adı"] == b["Ürün Adı"]) & (kalan["Uzunluk (cm)"] == b["Uzunluk (cm)"])].index[0]
+            used_idx.append(idx)
+        kalan = kalan.drop(used_idx)
+        planlar.append((f"Konteyner {len(planlar)+1} - {round(weight)} kg", pd.DataFrame(plan)))
 
-        for b in en_iyi_alt + en_iyi_ust:
-            kalan_bobinler = kalan_bobinler.drop(kalan_bobinler[(kalan_bobinler["Ürün Adı"] == b["Ürün Adı"]) & (kalan_bobinler["Uzunluk (cm)"] == b["Uzunluk (cm)"])].index[0])
-
-        for b in en_iyi_alt:
-            b["Taban"] = "Alt"
-        for b in en_iyi_ust:
-            b["Taban"] = "Üst"
-
-        konteyner = en_iyi_alt + en_iyi_ust
-        planlar.append((f"Konteyner {len(planlar) + 1} - Toplam Ağırlık: {round(sum(b['Ağırlık'] for b in konteyner))} kg", pd.DataFrame(konteyner)))
-
+    # Gösterim ve indirme
     st.subheader("📦 Konteyner Planları")
-    excel_output = pd.ExcelWriter("planlar.xlsx", engine="xlsxwriter")
-    for i, (plan_adi, tablo) in enumerate(planlar):
-        st.markdown(f"### {plan_adi}")
-        st.dataframe(tablo.reset_index(drop=True))
-        tablo.to_excel(excel_output, sheet_name=f"Plan {i+1}", index=False)
+    writer = pd.ExcelWriter("planlar.xlsx", engine="xlsxwriter")
+    for i, (title, df_plan) in enumerate(planlar, 1):
+        st.markdown(f"### {title}")
+        st.dataframe(df_plan)
+        df_plan.to_excel(writer, sheet_name=f"Plan {i}", index=False)
+    writer.close()
 
     st.subheader("📊 Özet Rapor")
-    toplam_konteyner = len(planlar)
-    st.write(f"Toplam konteyner sayısı: **{toplam_konteyner}**")
-
     ozet = bobinler.copy()
-    ozet["Plana Alındı"] = True
+    ozet["Plana Alındı"] = ~kalan.index.isin(bobinler.index)
     original_orders = df.set_index("Product Code")["Order"].to_dict()
-    ozet_grouped = ozet.groupby("Ürün Adı").agg({
-        "Ağırlık": "sum"
-    }).rename(columns={"Ağırlık": "Plana Alınan Toplam Order"})
-    ozet_grouped["Toplam Order"] = ozet_grouped.index.map(original_orders)
-    ozet_grouped["Kalan Order"] = ozet_grouped["Toplam Order"] - ozet_grouped["Plana Alınan Toplam Order"]
-
-    st.dataframe(ozet_grouped.reset_index())
-    ozet_grouped.to_excel(excel_output, sheet_name="Özet", index=True)
-    excel_output.close()
+    grp = ozet[ozet["Plana Alındı"]].groupby("Ürün Adı").agg({"Ağırlık": "sum"}).rename(columns={"Ağırlık": "Plana Alınan"})
+    grp["Toplam Order"] = [original_orders[k] for k in grp.index]
+    grp["Kalan Order"] = grp["Toplam Order"] - grp["Plana Alındı"]
+    st.dataframe(grp.reset_index())
 
     with open("planlar.xlsx", "rb") as f:
-        st.download_button("📅 Excel olarak indir (Plan + Özet)", data=f, file_name="planlar.xlsx")
+        st.download_button("📅 Excel indir (Plan+Özet)", data=f, file_name="planlar.xlsx")

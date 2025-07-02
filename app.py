@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
+from itertools import combinations
 
 st.set_page_config(layout="wide")
 st.title("🚛 Konteyner Yükleme Planlama Aracı")
@@ -19,7 +20,7 @@ if uploaded_file:
 
     ton_basina_yuk = st.number_input("🧽 Her bir konteyner planı için maksimum tonaj girin (kg)", min_value=1000, max_value=30000, value=25000, step=500)
     min_konteyner_tonaj = st.number_input("🔻 Minimum kabul edilebilir konteyner tonajı (kg)", min_value=1000, max_value=ton_basina_yuk, value=20000, step=500)
-    hedef_konteyner_sayisi = st.number_input("🌟 Hedef konteyner sayısı (isteğe bağlı)", min_value=0, value=0, step=1)
+    hedef_konteyner_sayisi = st.number_input("🎯 Hedef konteyner sayısı (isteğe bağlı)", min_value=0, value=0, step=1)
 
     st.markdown(f"💡 Her konteyner için yükleme sınırı: **{ton_basina_yuk:,} kg**, minimum: **{min_konteyner_tonaj:,} kg**")
 
@@ -33,91 +34,51 @@ if uploaded_file:
                 "Üst Tabana Uygun": row["Üst Tabana Uygun"]
             })
 
-    bobinler = pd.DataFrame(rows)
-    bobinler = bobinler.reset_index(drop=True)
-
+    bobinler = pd.DataFrame(rows).reset_index(drop=True)
     planlar = []
     kalan_bobinler = bobinler.copy()
+
+    def hesapla_skor(alt, ust, max_uzunluk=2650, hedef_tonaj=25000):
+        toplam_agirlik = sum(b["Ağırlık"] for b in alt + ust)
+        yukseklik_uyum_skoru = sum(
+            1 for i in range(min(len(alt), len(ust)))
+            if alt[i]["Uzunluk (cm)"] + ust[i]["Uzunluk (cm)"] <= max_uzunluk
+        )
+        tonaj_yakinlik_skoru = max(0, 1 - abs(toplam_agirlik - hedef_tonaj) / hedef_tonaj)
+        return yukseklik_uyum_skoru + tonaj_yakinlik_skoru, toplam_agirlik
 
     while not kalan_bobinler.empty:
         if hedef_konteyner_sayisi and len(planlar) >= hedef_konteyner_sayisi:
             break
 
-        konteyner = []
-        toplam_agirlik = 0
-        alt_bobinler = []
-        ust_bobinler = []
+        alt_bobinler_all = kalan_bobinler[kalan_bobinler["Üst Tabana Uygun"] == False].to_dict("records")
+        ust_bobinler_all = kalan_bobinler[kalan_bobinler["Üst Tabana Uygun"] == True].to_dict("records")
 
-        kalan_bobinler = kalan_bobinler.sort_values(by=["Uzunluk (cm)", "Ağırlık"], ascending=[False, False]).reset_index(drop=True)
+        en_iyi_skor = -1
+        en_iyi_alt = []
+        en_iyi_ust = []
 
-        for idx in list(kalan_bobinler.index):
-            bobin = kalan_bobinler.loc[idx]
-            if toplam_agirlik + bobin["Ağırlık"] > ton_basina_yuk:
-                continue
-            if not bobin["Üst Tabana Uygun"] and len(alt_bobinler) < 11:
-                alt_bobinler.append({**bobin, "Taban": "Alt"})
-                toplam_agirlik += bobin["Ağırlık"]
-                kalan_bobinler = kalan_bobinler.drop(idx, errors='ignore')
+        for alt_combo in combinations(alt_bobinler_all, min(11, len(alt_bobinler_all))):
+            for ust_combo in combinations(ust_bobinler_all, min(11, len(ust_bobinler_all))):
+                skor, agirlik = hesapla_skor(list(alt_combo), list(ust_combo), 2650, ton_basina_yuk)
+                if agirlik <= ton_basina_yuk and agirlik >= min_konteyner_tonaj and skor > en_iyi_skor:
+                    en_iyi_skor = skor
+                    en_iyi_alt = list(alt_combo)
+                    en_iyi_ust = list(ust_combo)
 
-        for idx in list(kalan_bobinler.index):
-            bobin = kalan_bobinler.loc[idx]
-            if not bobin["Üst Tabana Uygun"]:
-                continue
-            if toplam_agirlik + bobin["Ağırlık"] > ton_basina_yuk:
-                continue
-            if len(ust_bobinler) >= 11:
-                break
+        if not en_iyi_alt and not en_iyi_ust:
+            break
 
-            i = len(ust_bobinler)
-            if i < len(alt_bobinler):
-                alt_uzunluk = sorted([b["Uzunluk (cm)"] for b in alt_bobinler])[i]
-            else:
-                alt_uzunluk = 0
+        for b in en_iyi_alt + en_iyi_ust:
+            kalan_bobinler = kalan_bobinler.drop(kalan_bobinler[(kalan_bobinler["Ürün Adı"] == b["Ürün Adı"]) & (kalan_bobinler["Uzunluk (cm)"] == b["Uzunluk (cm)"])].index[0])
 
-            if bobin["Uzunluk (cm)"] + alt_uzunluk <= 2650:
-                ust_bobinler.append({**bobin, "Taban": "Üst"})
-                toplam_agirlik += bobin["Ağırlık"]
-                kalan_bobinler = kalan_bobinler.drop(idx, errors='ignore')
+        for b in en_iyi_alt:
+            b["Taban"] = "Alt"
+        for b in en_iyi_ust:
+            b["Taban"] = "Üst"
 
-        if len(alt_bobinler) == 0 and len(ust_bobinler) == 0 and kalan_bobinler["Üst Tabana Uygun"].all():
-            for idx in list(kalan_bobinler.index):
-                bobin = kalan_bobinler.loc[idx]
-                if toplam_agirlik + bobin["Ağırlık"] > ton_basina_yuk:
-                    continue
-                if len(alt_bobinler) < 11:
-                    alt_bobinler.append({**bobin, "Taban": "Alt"})
-                elif len(ust_bobinler) < 11:
-                    if bobin["Uzunluk (cm)"] + 0 <= 2650:
-                        ust_bobinler.append({**bobin, "Taban": "Üst"})
-                toplam_agirlik += bobin["Ağırlık"]
-                kalan_bobinler = kalan_bobinler.drop(idx, errors='ignore')
-
-        for idx in list(kalan_bobinler.index):
-            if toplam_agirlik >= ton_basina_yuk:
-                break
-            bobin = kalan_bobinler.loc[idx]
-            if toplam_agirlik + bobin["Ağırlık"] > ton_basina_yuk:
-                continue
-            if len(alt_bobinler) < 11:
-                alt_bobinler.append({**bobin, "Taban": "Alt"})
-                toplam_agirlik += bobin["Ağırlık"]
-                kalan_bobinler = kalan_bobinler.drop(idx, errors='ignore')
-            elif len(ust_bobinler) < 11:
-                i = len(ust_bobinler)
-                if i < len(alt_bobinler):
-                    alt_uzunluk = sorted([b["Uzunluk (cm)"] for b in alt_bobinler])[i]
-                else:
-                    alt_uzunluk = 0
-                if bobin["Uzunluk (cm)"] + alt_uzunluk <= 2650:
-                    ust_bobinler.append({**bobin, "Taban": "Üst"})
-                    toplam_agirlik += bobin["Ağırlık"]
-                    kalan_bobinler = kalan_bobinler.drop(idx, errors='ignore')
-
-        if toplam_agirlik < min_konteyner_tonaj:
-            continue
-
-        konteyner = alt_bobinler + ust_bobinler
-        planlar.append((f"Konteyner {len(planlar) + 1} - Toplam Ağırlık: {round(toplam_agirlik)} kg", pd.DataFrame(konteyner)))
+        konteyner = en_iyi_alt + en_iyi_ust
+        planlar.append((f"Konteyner {len(planlar) + 1} - Toplam Ağırlık: {round(sum(b['Ağırlık'] for b in konteyner))} kg", pd.DataFrame(konteyner)))
 
     st.subheader("📦 Konteyner Planları")
     excel_output = pd.ExcelWriter("planlar.xlsx", engine="xlsxwriter")

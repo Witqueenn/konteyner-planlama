@@ -18,7 +18,8 @@ if uploaded_file:
     st.dataframe(df)
 
     ton_basina_yuk = st.number_input("🧽 Her bir konteyner planı için maksimum tonaj girin (kg)", min_value=1000, max_value=30000, value=25000, step=500)
-    st.markdown(f"💡 Her konteyner için maksimum yükleme sınırı: **{ton_basina_yuk:,} kg**")
+    min_konteyner_tonaj = st.number_input("🔻 Minimum kabul edilebilir konteyner tonajı (kg)", min_value=1000, max_value=ton_basina_yuk, value=20000, step=500)
+    st.markdown(f"💡 Her konteyner için yükleme sınırı: **{ton_basina_yuk:,} kg**, minimum: **{min_konteyner_tonaj:,} kg**")
 
     rows = []
     for _, row in df.iterrows():
@@ -42,7 +43,9 @@ if uploaded_file:
         alt_bobinler = []
         ust_bobinler = []
 
-        # Alt tabana 11 adede kadar büyük (1250 üstü) bobin yerleştir
+        # Öncelik: Konteyner yüksekliği toplamı 2650/2600'e yakın kombinasyonlarla planlamaya çalış
+        kalan_bobinler = kalan_bobinler.sort_values(by=["Uzunluk (cm)", "Ağırlık"], ascending=[False, False]).reset_index(drop=True)
+
         for idx in list(kalan_bobinler.index):
             bobin = kalan_bobinler.loc[idx]
             if toplam_agirlik + bobin["Ağırlık"] > ton_basina_yuk:
@@ -52,7 +55,6 @@ if uploaded_file:
                 toplam_agirlik += bobin["Ağırlık"]
                 kalan_bobinler = kalan_bobinler.drop(idx)
 
-        # Üst tabana 11 adede kadar kısa (1250 ve altı) bobin yerleştir
         for idx in list(kalan_bobinler.index):
             bobin = kalan_bobinler.loc[idx]
             if not bobin["Üst Tabana Uygun"]:
@@ -68,13 +70,11 @@ if uploaded_file:
             else:
                 alt_uzunluk = 0
 
-            # Yükseklik toplamı 2650'yi geçmesin
             if bobin["Uzunluk (cm)"] + alt_uzunluk <= 2650:
                 ust_bobinler.append({**bobin, "Taban": "Üst"})
                 toplam_agirlik += bobin["Ağırlık"]
                 kalan_bobinler = kalan_bobinler.drop(idx)
 
-        # Eğer elimizde sadece kısa bobinler kaldıysa (1250 ve altı), hem alta hem üste yerleştirebiliriz
         if len(alt_bobinler) == 0 and len(ust_bobinler) == 0 and kalan_bobinler["Üst Tabana Uygun"].all():
             for idx in list(kalan_bobinler.index):
                 bobin = kalan_bobinler.loc[idx]
@@ -88,7 +88,6 @@ if uploaded_file:
                 toplam_agirlik += bobin["Ağırlık"]
                 kalan_bobinler = kalan_bobinler.drop(idx)
 
-        # Tonaj eksikse aynı ürünlerden ekle (uzunluk sınırı + konteyner yüksekliği aşımı olmadan)
         for idx in list(kalan_bobinler.index):
             if toplam_agirlik >= ton_basina_yuk:
                 break
@@ -109,6 +108,9 @@ if uploaded_file:
                     ust_bobinler.append({**bobin, "Taban": "Üst"})
                     toplam_agirlik += bobin["Ağırlık"]
                     kalan_bobinler = kalan_bobinler.drop(idx)
+
+        if toplam_agirlik < min_konteyner_tonaj:
+            continue  # Bu plan yetersiz olduğu için atlanır
 
         konteyner = alt_bobinler + ust_bobinler
         planlar.append((f"Konteyner {len(planlar) + 1} - Toplam Ağırlık: {round(toplam_agirlik)} kg", pd.DataFrame(konteyner)))

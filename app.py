@@ -19,6 +19,8 @@ if uploaded_file:
 
     ton_basina_yuk = st.number_input("🧽 Her bir konteyner planı için maksimum tonaj girin (kg)", min_value=1000, max_value=30000, value=25000, step=500)
     min_konteyner_tonaj = st.number_input("🔻 Minimum kabul edilebilir konteyner tonajı (kg)", min_value=1000, max_value=ton_basina_yuk, value=20000, step=500)
+    hedef_konteyner_sayisi = st.number_input("🎯 Hedef konteyner sayısı (isteğe bağlı)", min_value=0, value=0, step=1)
+
     st.markdown(f"💡 Her konteyner için yükleme sınırı: **{ton_basina_yuk:,} kg**, minimum: **{min_konteyner_tonaj:,} kg**")
 
     rows = []
@@ -38,12 +40,14 @@ if uploaded_file:
     kalan_bobinler = bobinler.copy()
 
     while not kalan_bobinler.empty:
+        if hedef_konteyner_sayisi and len(planlar) >= hedef_konteyner_sayisi:
+            break
+
         konteyner = []
         toplam_agirlik = 0
         alt_bobinler = []
         ust_bobinler = []
 
-        # Öncelik: Konteyner yüksekliği toplamı 2650/2600'e yakın kombinasyonlarla planlamaya çalış
         kalan_bobinler = kalan_bobinler.sort_values(by=["Uzunluk (cm)", "Ağırlık"], ascending=[False, False]).reset_index(drop=True)
 
         for idx in list(kalan_bobinler.index):
@@ -110,7 +114,7 @@ if uploaded_file:
                     kalan_bobinler = kalan_bobinler.drop(idx)
 
         if toplam_agirlik < min_konteyner_tonaj:
-            continue  # Bu plan yetersiz olduğu için atlanır
+            continue
 
         konteyner = alt_bobinler + ust_bobinler
         planlar.append((f"Konteyner {len(planlar) + 1} - Toplam Ağırlık: {round(toplam_agirlik)} kg", pd.DataFrame(konteyner)))

@@ -10,7 +10,6 @@ uploaded_file = st.file_uploader("📌 Dosya yükle (Excel formatında)", type=[
 if not uploaded_file:
     st.info("Lütfen bir Excel dosyası yükleyin.")
 else:
-    # Veri okuma ve ön işleme
     df = pd.read_excel(uploaded_file)
     df["Uzunluk (cm)"] = df["Product Code"].apply(lambda x: int(str(x).split("/")[2]))
     df["Bobin Ağırlığı (kg)"] = df["Uzunluk (cm)"] * 1.15
@@ -18,7 +17,6 @@ else:
     df["Üst Tabana Uygun"] = df["Uzunluk (cm)"] <= 1250
     st.dataframe(df)
 
-    # Parametreler
     ton_basina_yuk = st.number_input(
         "🧽 Maks konteyner tonajı (kg)", min_value=1000, max_value=30000, value=25000, step=500)
     min_konteyner_tonaj = st.number_input(
@@ -27,9 +25,7 @@ else:
         "🎯 Hedef konteyner sayısı (0=tanımsız)", min_value=0, value=0, step=1)
     st.markdown(f"💡 Tonaj aralığı: **{min_konteyner_tonaj:,} - {ton_basina_yuk:,}** kg")
 
-    # Planlama butonu
     if st.button("🎬 Konteyner Planı Oluştur"):
-        # Bobin listesi oluşturma
         rows = []
         for _, row in df.iterrows():
             for _ in range(row["Bobin Adedi"]):
@@ -41,10 +37,7 @@ else:
                 })
         bobinler = pd.DataFrame(rows).reset_index(drop=True)
 
-        # Sabitler
         MAX_ALT, MAX_UST, MAX_HIGH = 11, 11, 2650
-
-        # Kombinasyon sayısını hesapla
         altlar_df = bobinler[~bobinler["Üst Tabana Uygun"]]
         ustler_df = bobinler[bobinler["Üst Tabana Uygun"]]
         n_alt, n_ust = len(altlar_df), len(ustler_df)
@@ -52,9 +45,8 @@ else:
         total_ust = sum(math.comb(n_ust, u) for u in range(0, min(MAX_UST, n_ust) + 1))
         total_iter = total_alt * total_ust
         progress = st.progress(0)
-        iter_count = 0
+        iter_count = [0]
 
-        # Skorlama ve en iyi planı bulma fonksiyonu
         def konteyner_skora_gore_planla(kalan_df):
             alt_records = kalan_df[~kalan_df["Üst Tabana Uygun"]].to_dict("records")
             ust_records = kalan_df[kalan_df["Üst Tabana Uygun"]].to_dict("records")
@@ -69,20 +61,16 @@ else:
                         for ust_combo in combinations(ust_records, ust_len):
                             ust_list = list(ust_combo)
                             w = alt_w + sum(b["Ağırlık"] for b in ust_list)
-
-                            # Tonaj sınırı
                             if w > ton_basina_yuk or w < min_konteyner_tonaj:
                                 continue
-                            # Yükseklik uyumu
-                            ok = True
+                            height_ok = True
                             for i in range(min(len(alt_list), len(ust_list))):
                                 if alt_list[i]["Uzunluk (cm)"] + ust_list[i]["Uzunluk (cm)"] > MAX_HIGH:
-                                    ok = False
+                                    height_ok = False
                                     break
-                            if not ok:
+                            if not height_ok:
                                 continue
 
-                            # Skor hesaplama
                             height_score = sum(
                                 1 for i in range(min(len(alt_list), len(ust_list)))
                                 if alt_list[i]["Uzunluk (cm)"] + ust_list[i]["Uzunluk (cm)"] <= MAX_HIGH
@@ -90,9 +78,8 @@ else:
                             tonaj_score = 1 - abs(w - ton_basina_yuk) / ton_basina_yuk
                             score = height_score + tonaj_score
 
-                            nonlocal iter_count, progress
-                            iter_count += 1
-                            progress.progress(min(iter_count / total_iter, 1.0))
+                            iter_count[0] += 1
+                            progress.progress(min(iter_count[0] / total_iter, 1.0))
 
                             if score > best_score:
                                 best_score, best_plan, best_weight = score, (alt_list, ust_list), w
@@ -104,7 +91,6 @@ else:
                 b["Taban"] = "Üst"
             return alt_list + ust_list, best_weight
 
-        # Ana planlama döngüsü
         planlar = []
         kalan = bobinler.copy()
         while not kalan.empty:
@@ -115,12 +101,14 @@ else:
                 break
             used_idx = []
             for b in plan:
-                idx = kalan[(kalan["Ürün Adı"] == b["Ürün Adı"]) & (kalan["Uzunluk (cm)"] == b["Uzunluk (cm)"])].index[0]
+                idx = kalan[
+                    (kalan["Ürün Adı"] == b["Ürün Adı"]) &
+                    (kalan["Uzunluk (cm)"] == b["Uzunluk (cm)"])
+                ].index[0]
                 used_idx.append(idx)
             kalan = kalan.drop(used_idx)
             planlar.append((f"Konteyner {len(planlar)+1} - {round(weight)} kg", pd.DataFrame(plan)))
 
-        # Sonuç gösterimi
         st.subheader("📦 Konteyner Planları")
         writer = pd.ExcelWriter("planlar.xlsx", engine="xlsxwriter")
         for i, (title, df_plan) in enumerate(planlar, 1):
@@ -129,7 +117,6 @@ else:
             df_plan.to_excel(writer, sheet_name=f"Plan {i}", index=False)
         writer.close()
 
-        # Özet rapor
         st.subheader("📊 Özet Rapor")
         ozet = bobinler.copy()
         ozet["Plana Alındı"] = ~kalan.index.isin(bobinler.index)
@@ -144,6 +131,6 @@ else:
         grp["Kalan Order"] = grp["Toplam Order"] - grp["Plana Alındı"]
         st.dataframe(grp.reset_index())
 
-        # Excel indir
         with open("planlar.xlsx", "rb") as f:
             st.download_button("📅 Excel indir (Plan+Özet)", data=f, file_name="planlar.xlsx")
+
